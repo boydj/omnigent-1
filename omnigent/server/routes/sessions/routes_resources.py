@@ -63,8 +63,12 @@ from omnigent.server.auth import (
 from omnigent.server.feature_flags import Feature, FeatureFlags
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.permissions import check_session_access
+from omnigent.server.pull_request_viewers import OWNER_ONLY_CHANGES_MESSAGE
 from omnigent.server.routes._auth_helpers import (
     get_user_id as _get_user_id,
+)
+from omnigent.server.routes._auth_helpers import (
+    is_session_owner as _is_session_owner,
 )
 from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
@@ -1176,6 +1180,25 @@ def register_resources_routes(
             if exc.status == 400:
                 raise HTTPException(status_code=400, detail=exc.message) from exc
             raise HTTPException(status_code=502, detail=exc.message) from exc
+
+    async def _caller_is_session_owner(conv: Conversation, request: Request) -> bool:
+        """Whether the caller holds the owner grant on the session's root; admins don't count."""
+        return await asyncio.to_thread(
+            _is_session_owner,
+            _get_user_id(request, auth_provider),
+            conv,
+            auth_provider=auth_provider,
+            permission_store=permission_store,
+        )
+
+    async def _require_pull_request_owner(conv: Conversation, request: Request) -> None:
+        """Refuse a change to the session's pull requests to anyone but its owner.
+
+        Called right after the route's own access check, before anything is stored or sent:
+        every change runs as the host's code-host account, which is the owner's.
+        """
+        if not await _caller_is_session_owner(conv, request):
+            raise OmnigentError(OWNER_ONLY_CHANGES_MESSAGE, code=ErrorCode.FORBIDDEN)
 
     async def _post_pr_edit(
         session_id: str,
@@ -3780,6 +3803,7 @@ def register_resources_routes(
         :returns: The first page of the session's remaining linked PRs.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         if pull_request_store is None:
             raise OmnigentError(
                 "Pull request storage is unavailable", code=ErrorCode.INTERNAL_ERROR
@@ -3993,6 +4017,7 @@ def register_resources_routes(
                 permission_store,
             )
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4024,6 +4049,7 @@ def register_resources_routes(
         :returns: The refreshed ``session.github.info`` object.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         params = {"account": body.get("account"), "remote": body.get("remote")}
         if body.get("pr_url"):
@@ -4076,6 +4102,7 @@ def register_resources_routes(
         :returns: A list of ``{name, color, description}`` with ``has_more``.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         params = await _github_params(session_id, {"pr_url": pr_url})
         return await _fs_get_with_host_fallback(
             session_id,
@@ -4103,6 +4130,7 @@ def register_resources_routes(
         :returns: A ``session.github.pr_labels`` with the PR's resulting labels.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4140,6 +4168,7 @@ def register_resources_routes(
         :returns: A ``session.github.merge_options`` with ``methods`` and ``default``.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         params = await _github_params(session_id, {"pr_url": pr_url})
         return await _fs_get_with_host_fallback(
             session_id,
@@ -4169,6 +4198,7 @@ def register_resources_routes(
         :returns: A ``session.github.pr_merge``.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4203,6 +4233,7 @@ def register_resources_routes(
         :returns: A ``session.github.pr_merge``.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4241,6 +4272,7 @@ def register_resources_routes(
         :returns: A ``session.github.pr_merge``.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4274,6 +4306,7 @@ def register_resources_routes(
         :returns: A list of ``{login, kind, name}`` with ``has_more``.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         params = await _github_params(session_id, {"pr_url": pr_url})
         return await _fs_get_with_host_fallback(
             session_id,
@@ -4303,6 +4336,7 @@ def register_resources_routes(
         :returns: A ``session.github.pr_reviewers`` with the PR's resulting reviewers.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4382,6 +4416,7 @@ def register_resources_routes(
     async def create_session_review_thread(request: Request, session_id: str) -> dict[str, Any]:
         """Publish a new line conversation with the host's selected GitHub account."""
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4411,6 +4446,7 @@ def register_resources_routes(
     ) -> dict[str, Any]:
         """Publish one reply with the host's selected GitHub account."""
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4435,6 +4471,7 @@ def register_resources_routes(
     async def create_session_github_comment(request: Request, session_id: str) -> dict[str, Any]:
         """Post a top-level comment using the host's selected GitHub account."""
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4466,6 +4503,7 @@ def register_resources_routes(
         :returns: A ``session.github.pr_details`` with the PR's resulting title and body.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
@@ -4509,6 +4547,7 @@ def register_resources_routes(
         :returns: A ``session.github.pr_attachment`` with the ``url`` to embed.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        await _require_pull_request_owner(conv, request)
         content = await _read_upload_capped(file, _MAX_PR_ATTACHMENT_BYTES)
         name = file.filename or ""
         tracking = await _github_params(session_id, {"pr_url": pr_url})
